@@ -135,7 +135,7 @@ if menu == "🏠 낙찰 현황 대시보드":
     else:
         st.warning("데이터가 없습니다. 업데이트 버튼을 눌러주세요.")
 
-# --- 메뉴 2: 예가 상세 분석 (상위 4개 평균 표시 포함) ---
+# --- 메뉴 2: 예가 상세 분석 (예가번호 포함 상위 4개 표시) ---
 elif menu == "🎯 예가 상세 분석":
     st.header("🎯 예비가격 상세 분석 (기초예가 분포)")
     if os.path.exists(PRICE_FILE) and os.path.exists(MASTER_FILE):
@@ -164,34 +164,51 @@ elif menu == "🎯 예가 상세 분석":
             if selected_label:
                 target_bid = bid_map[selected_label]
                 detail = price_df[price_df['bidNtceNo'] == target_bid].copy()
+                
+                # 데이터 타입 변환
                 detail['bsisPlnprc'] = pd.to_numeric(detail['bsisPlnprc'], errors='coerce')
                 detail['drwtNum'] = pd.to_numeric(detail['drwtNum'], errors='coerce')
+                # 예가번호(1~15) 컬럼 추가 처리
+                detail['compnoRsrvtnPrceSno'] = pd.to_numeric(detail['compnoRsrvtnPrceSno'], errors='coerce')
 
                 if not detail['bsisPlnprc'].isnull().all():
                     st.subheader(f"📍 {selected_label}")
                     
-                    # --- 핵심 로직: 최종 선택된 상위 4개 예가 및 평균 계산 ---
+                    # --- 수정된 로직: 예가번호(Sno)와 금액 함께 추출 ---
                     top4_nodes = detail.sort_values('drwtNum', ascending=False).head(4)
-                    top4_prices = top4_nodes['bsisPlnprc'].tolist()
+                    
+                    # 표시용 텍스트 리스트 생성: "번호. 금액" 형식
+                    top4_display = []
+                    top4_prices = []
+                    for _, row in top4_nodes.iterrows():
+                        sno = int(row['compnoRsrvtnPrceSno'])
+                        price = int(row['bsisPlnprc'])
+                        top4_display.append(f"**{sno}번.** {price:,} 원")
+                        top4_prices.append(price)
+                    
                     avg_price = sum(top4_prices) / 4 if len(top4_prices) == 4 else 0
                     
                     # 화면 요약 박스 표시
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.info(f"✅ **최종 선택된 예가 (추첨 상위 4개)**\n\n" + 
-                                "\n".join([f"- {int(p):,} 원" for p in top4_prices]))
+                        st.info(f"✅ **최종 선택된 예가 (번호 및 금액)**\n\n" + 
+                                "\n".join([f"- {item}" for item in top4_display]))
                     with col2:
                         st.success(f"📊 **선택 예가 평균 금액**\n\n### {avg_price:,.2f} 원")
                     st.divider()
 
-                    # 시각화 그래프
+                    # 시각화 그래프 (X축에 예가번호를 함께 표시하여 가독성 증대)
+                    detail['label'] = detail['compnoRsrvtnPrceSno'].astype(str) + "번"
                     fig = px.bar(detail.sort_values('bsisPlnprc'), 
-                                 x='bsisPlnprc', y='drwtNum', color='drwtYn',
+                                 x='label', y='drwtNum', color='drwtYn',
                                  color_discrete_map={'Y': '#EF553B', 'N': '#636EFA'},
-                                 title="예비가격 분포 (Y: 추첨됨)",
-                                 labels={'bsisPlnprc':'기초예비가격', 'drwtNum':'추첨횟수', 'drwtYn':'추첨여부'})
+                                 title="예비가격 번호별 추첨 분포",
+                                 labels={'label':'예가번호', 'drwtNum':'추첨횟수', 'drwtYn':'추첨여부'})
                     st.plotly_chart(fig, use_container_width=True)
-                    st.dataframe(detail[['bsisPlnprc', 'drwtNum', 'drwtYn']].sort_values('bsisPlnprc'), 
+                    
+                    # 표에는 모든 정보 노출
+                    st.dataframe(detail[['compnoRsrvtnPrceSno', 'bsisPlnprc', 'drwtNum', 'drwtYn']].sort_values('compnoRsrvtnPrceSno'), 
                                  width=1500, hide_index=True)
     else:
         st.error("데이터 파일이 없습니다.")
+
