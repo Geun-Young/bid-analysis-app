@@ -8,6 +8,7 @@ import plotly.express as px
 import os
 
 # --- 1. 설정 및 API 정보 ---
+# Streamlit Cloud의 Secrets 기능을 사용하여 인증키를 관리합니다.
 SERVICE_KEY = st.secrets["data_go_kr_key"]
 BASE_URL = "http://apis.data.go.kr/1230000/as/ScsbidInfoService"
 MASTER_FILE = "HIST_BID_MASTER_5Y.csv"
@@ -111,25 +112,22 @@ if st.sidebar.button("🔄 전체 데이터 업데이트"):
     run_integrated_update()
     st.rerun()
 
+# --- 메뉴 1: 낙찰 현황 대시보드 (검색/최신순 정렬 포함) ---
 if menu == "🏠 낙찰 현황 대시보드":
     st.header("🏗️ 대전 지역 상하수도설비 낙찰 현황")
     if os.path.exists(MASTER_FILE):
         df = pd.read_csv(MASTER_FILE)
         df['rlOpengDt'] = pd.to_datetime(df['rlOpengDt'])
-        
-        # 기본 정렬: 최신순
-        df = df.sort_values('rlOpengDt', ascending=False)
+        df = df.sort_values('rlOpengDt', ascending=False) # 기본 최신순 정렬
 
-        # 상단 검색 바 추가
         search_query = st.text_input("🔍 검색 (공고명 또는 낙찰업체명을 입력하세요)", "")
 
         if search_query:
-            # 검색 필터링 (공고명 또는 업체명에 키워드가 포함된 경우)
             filtered_df = df[
                 df['bidNtceNm'].str.contains(search_query, na=False) | 
                 df['bidwinnrNm'].str.contains(search_query, na=False)
             ]
-            st.write(f"🔎 '{search_query}' 검색 결과: {len(filtered_df)}건")
+            st.write(f"🔎 검색 결과: {len(filtered_df)}건")
             st.dataframe(filtered_df, width=1500, hide_index=True)
         else:
             st.metric("총 수집 공고", f"{len(df):,} 건")
@@ -137,6 +135,7 @@ if menu == "🏠 낙찰 현황 대시보드":
     else:
         st.warning("데이터가 없습니다. 업데이트 버튼을 눌러주세요.")
 
+# --- 메뉴 2: 예가 상세 분석 (상위 4개 평균 표시 포함) ---
 elif menu == "🎯 예가 상세 분석":
     st.header("🎯 예비가격 상세 분석 (기초예가 분포)")
     if os.path.exists(PRICE_FILE) and os.path.exists(MASTER_FILE):
@@ -154,7 +153,6 @@ elif menu == "🎯 예가 상세 분석":
             available_bids = price_df['bidNtceNo'].unique()
             display_list = []
             bid_map = {}
-            
             for _, row in sorted_meta.iterrows():
                 if row['bidNtceNo'] in available_bids:
                     label = f"[{row['bidNtceNo']}] {row['bidNtceNm']}"
@@ -171,6 +169,22 @@ elif menu == "🎯 예가 상세 분석":
 
                 if not detail['bsisPlnprc'].isnull().all():
                     st.subheader(f"📍 {selected_label}")
+                    
+                    # --- 핵심 로직: 최종 선택된 상위 4개 예가 및 평균 계산 ---
+                    top4_nodes = detail.sort_values('drwtNum', ascending=False).head(4)
+                    top4_prices = top4_nodes['bsisPlnprc'].tolist()
+                    avg_price = sum(top4_prices) / 4 if len(top4_prices) == 4 else 0
+                    
+                    # 화면 요약 박스 표시
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.info(f"✅ **최종 선택된 예가 (추첨 상위 4개)**\n\n" + 
+                                "\n".join([f"- {int(p):,} 원" for p in top4_prices]))
+                    with col2:
+                        st.success(f"📊 **선택 예가 평균 금액**\n\n### {avg_price:,.2f} 원")
+                    st.divider()
+
+                    # 시각화 그래프
                     fig = px.bar(detail.sort_values('bsisPlnprc'), 
                                  x='bsisPlnprc', y='drwtNum', color='drwtYn',
                                  color_discrete_map={'Y': '#EF553B', 'N': '#636EFA'},
