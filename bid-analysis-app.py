@@ -8,7 +8,7 @@ import plotly.express as px
 import os
 
 # --- 1. 설정 및 API 정보 ---
-# Streamlit Cloud의 Secrets에 저장된 키를 바로 사용합니다.
+# Streamlit Cloud Secrets에서 인증키를 가져옵니다.
 SERVICE_KEY = st.secrets["data_go_kr_key"]
 
 BASE_URL = "http://apis.data.go.kr/1230000/as/ScsbidInfoService"
@@ -34,20 +34,19 @@ def get_api_data(endpoint, extra_params):
         st.error(f"📡 API 통신 에러: {e}")
     return None
 
-# --- 2. 예비가격 수집 로직 (미수집분만 추출) ---
+# --- 2. 예비가격 수집 로직 (XML 매핑 반영) ---
 def update_price_details_logic(target_bid_list):
     if not target_bid_list:
         return pd.DataFrame()
 
     existing_price_df = pd.read_csv(PRICE_FILE) if os.path.exists(PRICE_FILE) else pd.DataFrame()
     
+    # 이미 수집된 공고번호는 제외하여 수집 시간 단축
     if not existing_price_df.empty:
         collected_bids = existing_price_df['bidNtceNo'].unique().tolist()
-        # 이미 상세 정보가 있는 공고는 제외하고 수집
         target_bid_list = [b for b in target_bid_list if b not in collected_bids]
 
     if not target_bid_list:
-        st.info("모든 공고의 예비가격이 이미 수집되어 있습니다.")
         return existing_price_df
 
     new_price_rows = []
@@ -55,7 +54,8 @@ def update_price_details_logic(target_bid_list):
     status_text = st.empty()
     
     for i, bid_no in enumerate(target_bid_list):
-        status_text.text(f"🎯 미수집 예가 가져오는 중: {i+1}/{len(target_bid_list)} (공고: {bid_no})")
+        status_text.text(f"🎯 신규 예가 수집 중: {i+1}/{len(target_bid_list)} (공고: {bid_no})")
+        # 예비가격 상세 API 호출 (inqryDiv: 2는 공고번호 기준)
         data = get_api_data("/getOpengResultListInfoCnstwkPreparPcDetail", {"inqryDiv": "2", "bidNtceNo": bid_no})
         
         if data and "response" in data:
@@ -64,13 +64,28 @@ def update_price_details_logic(target_bid_list):
             if items_root:
                 items = items_root if isinstance(items_root, list) else items_root.get("item", [])
                 if isinstance(items, dict): items = [items]
-                new_price_rows.extend(items)
+                
+                for item in items:
+                    # 사용자 제공 XML 구조에 맞게 필드 매핑
+                    mapped_item = {
+                        "bidNtceNo": item.get("bidNtceNo"),
+                        "preparPc": item.get("bsisPlnprc"), # 기초예비가격
+                        "drawCnt": item.get("drwtNum"),    # 추첨횟수
+                        "drwtYn": item.get("drwtYn"),      # 추첨여부(Y/N)
+                        "bidNtceNm": item.get("bidNtceNm")
+                    }
+                    new_price_rows.append(mapped_item)
         
         price_progress.progress((i + 1) / len(target_bid_list))
-        time.sleep(0.05) # API 부하 방지용 짧은 대기
+        time.sleep(0.05) # API 과부하 방지
 
     if new_price_rows:
         new_price_df = pd.DataFrame(new_price_rows)
+        # 숫자형 변환
+        new_price_df['preparPc'] = pd.to_numeric(new_price_df['preparPc'], errors='coerce')
+        new_price_df['drawCnt'] = pd.to_numeric(new_price_df['drawCnt'], errors='coerce')
+        
+        # 기존 데이터와 합치고 중복 제거
         final_price_df = pd.concat([existing_price_df, new_price_df]).drop_duplicates()
         final_price_df.to_csv(PRICE_FILE, index=False, encoding="utf-8-sig")
         return final_price_df
@@ -78,7 +93,7 @@ def update_price_details_logic(target_bid_list):
 
 # --- 3. 통합 업데이트 로직 ---
 def run_integrated_update():
-    # A. 낙찰 마스터 업데이트 (기존 로직 유지)
+    # A. 낙찰 마스터 업데이트
     existing_master = pd.read_csv(MASTER_FILE) if os.path.exists(MASTER_FILE) else pd.DataFrame()
     start_dt_str = "202201010000"
     if not existing_master.empty:
@@ -89,9 +104,9 @@ def run_integrated_update():
     end_dt_str = now.strftime('%Y%m%d%H%M')
     
     new_master_rows = []
-    st.info("🚜 1단계: 신규 낙찰 공고 확인 중...")
+    st.info("🚜 1단계: 신규 낙찰 정보를 조회 중입니다...")
     
-    # [수집 루프 - 연도/월 단위]
+    # 연/월 단위 수집 로직
     for year in range(int(start_dt_str[:4]), now.year + 1):
         s_month = int(start_dt_str[4:6]) if year == int(start_dt_str[:4]) else 1
         for month in range(s_month, 13):
@@ -116,56 +131,68 @@ def run_integrated_update():
                 new_master_rows.extend(items)
                 if len(items) < 999: break
                 page += 1
-
-    # 저장 및 예가 수집 연동
+    
+    # 마스터 저장
     if new_master_rows:
         new_master_df = pd.DataFrame(new_master_rows)
         final_master = pd.concat([existing_master, new_master_df]).drop_duplicates(subset=['bidNtceNo', 'bidNtceOrd'])
         final_master.to_csv(MASTER_FILE, index=False, encoding="utf-8-sig")
-        st.success(f"✅ {len(new_master_rows)}개의 새 공고를 마스터에 추가했습니다.")
-    
-    # B. 예가 미수집분 통합 수집 (마스터에 있는 모든 공고 대상 체크)
+        st.success(f"✅ 낙찰 마스터 업데이트 완료 ({len(new_master_rows)}건 추가)")
+
+    # B. 예비가격 미수집분 통합 업데이트
     updated_master = pd.read_csv(MASTER_FILE) if os.path.exists(MASTER_FILE) else pd.DataFrame()
     if not updated_master.empty:
-        st.info("🚀 2단계: 미수집된 예비가격 상세 정보를 가져옵니다...")
+        st.info("🚀 2단계: 누락된 예비가격 상세 정보를 가져옵니다...")
         all_bids = updated_master['bidNtceNo'].unique().tolist()
         update_price_details_logic(all_bids)
-        st.success("✅ 모든 데이터 최신화 완료!")
+        st.success("🎉 모든 데이터 업데이트가 성공적으로 끝났습니다!")
 
-# --- 4. 화면 구성 ---
-st.sidebar.title("📊 메뉴 선택")
-menu = st.sidebar.radio("기능 선택", ["🏠 낙찰 현황 대시보드", "🎯 예가 상세 분석"])
+# --- 4. 메인 화면 UI ---
+st.sidebar.title("🔍 분석 메뉴")
+menu = st.sidebar.radio("원하는 기능을 선택하세요", ["🏠 낙찰 현황 대시보드", "🎯 예가 상세 분석"])
 
-if st.sidebar.button("🔄 전체 데이터 최신화", help="낙찰 정보와 예비가격 미수집분을 모두 업데이트합니다."):
+if st.sidebar.button("🔄 전체 데이터 업데이트", help="새로운 낙찰 공고와 예비가격 데이터를 모두 가져옵니다."):
     run_integrated_update()
     st.rerun()
 
 if menu == "🏠 낙찰 현황 대시보드":
-    st.header("🏗️ 대전 상하수도설비공사 낙찰 현황")
+    st.header("🏗️ 대전 지역 상하수도설비 낙찰 현황")
     if os.path.exists(MASTER_FILE):
         df = pd.read_csv(MASTER_FILE)
         df['rlOpengDt'] = pd.to_datetime(df['rlOpengDt'])
-        st.metric("총 공고 수", f"{len(df):,} 건")
-        st.dataframe(df.sort_values('rlOpengDt', ascending=False), width='stretch', hide_index=True)
+        st.metric("총 수집 공고", f"{len(df):,} 건")
+        st.dataframe(df.sort_values('rlOpengDt', ascending=False), width=1500, hide_index=True)
     else:
-        st.warning("데이터 파일이 없습니다. 업데이트 버튼을 눌러주세요.")
+        st.warning("데이터가 없습니다. 업데이트 버튼을 눌러주세요.")
 
 elif menu == "🎯 예가 상세 분석":
-    st.header("🎯 예비가격 상세 분석")
+    st.header("🎯 예비가격 상세 분석 (기초예가 분포)")
     if os.path.exists(PRICE_FILE):
         price_df = pd.read_csv(PRICE_FILE)
-        # 최신 공고가 위로 오도록 정렬하여 선택 박스 구성
         bid_options = sorted(price_df['bidNtceNo'].unique(), reverse=True)
-        target_bid = st.selectbox("분석할 공고번호 선택", bid_options)
+        target_bid = st.selectbox("분석할 공고번호를 선택하세요", bid_options)
         
         if target_bid:
             detail = price_df[price_df['bidNtceNo'] == target_bid].copy()
-            detail['preparPc'] = pd.to_numeric(detail['preparPc'])
             
-            st.subheader(f"📍 공고번호: {target_bid}")
-            fig = px.scatter(detail, x='preparPc', y='drawCnt', size='drawCnt', color='drawCnt', 
-                             title="예비가격별 선택 횟수 분포", labels={'preparPc':'예비가격', 'drawCnt':'선택횟수'})
-            st.plotly_chart(fig, width='stretch')
-            st.dataframe(detail[['preparPc', 'drawCnt']].sort_values('preparPc'), width='stretch', hide_index=True)
+            if not detail.empty and 'preparPc' in detail.columns:
+                st.subheader(f"📍 공고명: {detail['bidNtceNm'].iloc[0]}")
+                
+                # 시각화: 막대 그래프 (예가별 추첨 횟수)
+                fig = px.bar(detail.sort_values('preparPc'), 
+                             x='preparPc', y='drawCnt',
+                             color='drwtYn', 
+                             color_discrete_map={'Y': '#EF553B', 'N': '#636EFA'},
+                             title=f"공고번호 [{target_bid}] 예비가격 분포",
+                             labels={'preparPc':'기초예비가격', 'drawCnt':'추첨횟수', 'drwtYn':'추첨여부'})
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # 상세 표
+                st.write("📋 상세 예비가격 목록")
+                st.dataframe(detail[['preparPc', 'drawCnt', 'drwtYn']].sort_values('preparPc'), 
+                             width=1500, hide_index=True)
+            else:
+                st.error("데이터 구조가 잘못되었습니다. 업데이트를 다시 수행해 주세요.")
     else:
-        st.error("예비가격 데이터 파일이 없습니다. 먼저 업데이트를 진행해 주세요.")
+        st.error("수집된 예가 데이터 파일이 없습니다.")
