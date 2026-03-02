@@ -46,7 +46,6 @@ def run_integrated_update():
     new_master_rows = []
     st.info("🚜 1단계: 신규 낙찰 정보를 조회 중입니다...")
     
-    # 연/월 단위 수집
     for year in range(int(start_dt_str[:4]), now.year + 1):
         s_month = int(start_dt_str[4:6]) if year == int(start_dt_str[:4]) else 1
         for month in range(s_month, 13):
@@ -83,8 +82,8 @@ def run_integrated_update():
     if not updated_master.empty:
         st.info("🚀 2단계: 누락된 예비가격 상세 정보를 가져옵니다...")
         existing_price = pd.read_csv(PRICE_FILE) if os.path.exists(PRICE_FILE) else pd.DataFrame()
-        collected_bids = existing_price['bidNtceNo'].unique().tolist() if not existing_price.empty else []
-        target_bids = [b for b in updated_master['bidNtceNo'].unique() if b not in collected_bids]
+        collected_bids = existing_price['bidNtceNo'].unique().astype(str).tolist() if not existing_price.empty else []
+        target_bids = [b for b in updated_master['bidNtceNo'].unique().astype(str) if b not in collected_bids]
 
         new_price_rows = []
         if target_bids:
@@ -119,41 +118,62 @@ if menu == "🏠 낙찰 현황 대시보드":
     if os.path.exists(MASTER_FILE):
         df = pd.read_csv(MASTER_FILE)
         st.metric("총 수집 공고", f"{len(df):,} 건")
-        st.dataframe(df, width=1500, hide_index=True)
+        st.dataframe(df.sort_values('rlOpengDt', ascending=False), width=1500, hide_index=True)
     else:
         st.warning("데이터가 없습니다. 업데이트를 먼저 진행해주세요.")
 
 elif menu == "🎯 예가 상세 분석":
     st.header("🎯 예비가격 상세 분석 (기초예가 분포)")
-    if os.path.exists(PRICE_FILE):
+    if os.path.exists(PRICE_FILE) and os.path.exists(MASTER_FILE):
         price_df = pd.read_csv(PRICE_FILE)
-        if not price_df.empty:
-            # bidNtceNo를 문자열로 변환하여 매칭 오류 방지
+        master_df = pd.read_csv(MASTER_FILE)
+        
+        if not price_df.empty and not master_df.empty:
+            # 데이터 정제: 공고번호 문자열 통일 및 날짜 병합
             price_df['bidNtceNo'] = price_df['bidNtceNo'].astype(str)
-            bid_options = sorted(price_df['bidNtceNo'].unique(), reverse=True)
-            target_bid = st.selectbox("분석할 공고번호를 선택하세요", bid_options)
+            master_df['bidNtceNo'] = master_df['bidNtceNo'].astype(str)
             
-            if target_bid:
+            # 마스터에서 필요한 정보(공고명, 개찰일)만 추출하여 중복 제거 후 결합
+            meta_df = master_df[['bidNtceNo', 'bidNtceNm', 'rlOpengDt']].drop_duplicates('bidNtceNo')
+            meta_df['rlOpengDt'] = pd.to_datetime(meta_df['rlOpengDt'])
+            
+            # 최신 날짜순으로 정렬된 목록 생성
+            sorted_meta = meta_df.sort_values('rlOpengDt', ascending=False)
+            
+            # [공고번호] 공고명 형식의 리스트 생성 (분석 대상이 있는 것만)
+            available_bids = price_df['bidNtceNo'].unique()
+            display_list = []
+            bid_map = {} # 사용자가 선택한 문구에서 공고번호를 역추적하기 위한 딕셔너리
+            
+            for idx, row in sorted_meta.iterrows():
+                if row['bidNtceNo'] in available_bids:
+                    label = f"[{row['bidNtceNo']}] {row['bidNtceNm']}"
+                    display_list.append(label)
+                    bid_map[label] = row['bidNtceNo']
+            
+            # 선택 상자 구성
+            selected_label = st.selectbox("분석할 공고를 선택하세요 (최신순)", display_list)
+            
+            if selected_label:
+                target_bid = bid_map[selected_label]
                 detail = price_df[price_df['bidNtceNo'] == target_bid].copy()
                 
-                # CSV 컬럼명 직접 사용 (bsisPlnprc, drwtNum)
                 detail['bsisPlnprc'] = pd.to_numeric(detail['bsisPlnprc'], errors='coerce')
                 detail['drwtNum'] = pd.to_numeric(detail['drwtNum'], errors='coerce')
 
                 if not detail['bsisPlnprc'].isnull().all():
-                    st.subheader(f"📍 공고명: {detail['bidNtceNm'].iloc[0]}")
+                    st.subheader(f"📍 {selected_label}")
                     
-                    # 시각화
                     fig = px.bar(detail.sort_values('bsisPlnprc'), 
                                  x='bsisPlnprc', y='drwtNum', color='drwtYn',
                                  color_discrete_map={'Y': '#EF553B', 'N': '#636EFA'},
-                                 title=f"공고번호 [{target_bid}] 예비가격 분포 (Y: 추첨됨)",
+                                 title=f"예비가격 분포 (Y: 추첨됨)",
                                  labels={'bsisPlnprc':'기초예비가격', 'drwtNum':'추첨횟수', 'drwtYn':'추첨여부'})
                     
                     st.plotly_chart(fig, use_container_width=True)
                     st.dataframe(detail[['bsisPlnprc', 'drwtNum', 'drwtYn']].sort_values('bsisPlnprc'), 
                                  width=1500, hide_index=True)
         else:
-            st.warning("데이터가 비어있습니다.")
+            st.warning("분석할 데이터가 부족합니다.")
     else:
-        st.error("CSV 파일이 없습니다. 업데이트 버튼을 눌러주세요.")
+        st.error("데이터 파일이 없습니다. 전체 업데이트를 실행해 주세요.")
